@@ -18,6 +18,7 @@
 | 菜单栏 App | Swift / SwiftUI `MenuBarExtra` | 只做显示和按钮，逻辑全在 `mvaultd`，通过本地 HTTP 调用 |
 | 外接盘监控 | 轮询 `diskutil` + 监听 `/Volumes` 目录变化 | 不引入 pyobjc；10 秒级延迟对家用足够 |
 | 开发顺序 | 先做实验（Spike）验证 Jellyfin 的拔盘行为，再定 T-02 的细节 | T-02 的复杂度取决于 Jellyfin 本身是否会删条目 |
+| 能用现成的不自研 | 备份 = Jellyfin 内置备份 + restic；通知渠道 = Apprise；整理刮削 = tinyMediaManager | 见需求文档 3.4；自研只做定时、规则和衔接。T-03 入库自动化推迟到 M3 按需做 |
 
 ---
 
@@ -45,10 +46,10 @@ C 类需求不写业务代码，交付物是 `docs/deploy.md` 的操作步骤，
 | 编号 | 操作步骤（写入部署手册） | `doctor` 自动检查 | 阶段 |
 | --- | --- | --- | --- |
 | C-01 | 建电影 / 剧集 / 家庭视频 3 个库，每库挂内置盘和外接盘文件夹；开实时监控 | 通过 API 读出各库路径，确认与 `config.yaml` 中的卷映射一致 | M0 |
-| C-02 | 按命名规范整理现有片库；文件夹带 `[tmdbid-xxx]` | `mvault lint <路径>` 列出不合规的文件名（复用 T-03 的识别逻辑） | M0 |
+| C-02 | 用 tinyMediaManager 按命名规范整理现有片库并写 NFO；文件夹带 `[tmdbid-xxx]` | `mvault lint <路径>` 列出不合规的文件名（基于 `guessit`，以后 T-03 复用） | M0 |
 | C-03 | 语言 zh-CN、国家 SG；装 TheTVDB、OMDb、Fanart 插件 | 检查库的元数据语言和已装插件 | M0 |
 | C-04 | 开 NFO 读写、图片存到媒体文件夹 | 检查对应库选项 | M0 |
-| C-05 | Infuse 添加服务器；关闭不需要的转码 | 无（人工验收） | M0 |
+| C-05 | Infuse 添加服务器；关闭不需要的转码；默认 Library Mode，Jellyfin 装 InfuseSync 插件 | 检查 InfuseSync 插件已装；两种模式的打开速度人工比较 | M0 |
 | C-06 | 装 OpenSubtitles 插件，填账号 | 检查插件已装 | M2 |
 | C-07 | 为家人建账户、设库权限和儿童分级上限 | 列出用户及权限，标出“能看所有库的非管理员” | M2 |
 | C-08 | 开 VideoToolbox 硬件加速 | 检查转码设置 | M2 |
@@ -90,7 +91,9 @@ C 类需求不写业务代码，交付物是 `docs/deploy.md` 的操作步骤，
 
 > T-02.3 的具体做法依赖 Spike S-1 的结论：若 Jellyfin 在库根目录不可读时本来就不删条目，T-02.3 可简化为只做“暂停扫描”。
 
-### 1.5 T-03 入库整理（P1）
+### 1.5 T-03 入库自动化（P2，M3 按需）
+
+先用 tinyMediaManager 手动入库，只有手动整理变得费事时才开发本工具。开发前先评估能否用 tinyMediaManager 的命令行模式完成识别和改名，自研只保留监听、跨盘移动、校验和撤销；不行再按下表自己实现。
 
 | 编号 | 子需求 | 实现要点 | 验收标准 |
 | --- | --- | --- | --- |
@@ -108,7 +111,7 @@ C 类需求不写业务代码，交付物是 `docs/deploy.md` 的操作步骤，
 | 编号 | 子需求 | 实现要点 | 验收标准 |
 | --- | --- | --- | --- |
 | T-04.1 | 接收 Jellyfin Webhook | `POST /webhook/jellyfin`，校验共享密钥，转换成内部事件 | 新片入库后收到“已入库：片名 (年份)” |
-| T-04.2 | 推送渠道 | Telegram Bot、Bark、SMTP 邮件，可同时启用多个 | `mvault notify test` 三个渠道都收到 |
+| T-04.2 | 推送渠道 | 用 Apprise 发送，渠道以 Apprise URL 配置（`tgram://`、`bark://`、`mailto://`），可同时启用多个；密钥部分存钥匙串 | `mvault notify test` 三个渠道都收到 |
 | T-04.3 | 规则 | 按事件类型和级别路由；相同事件 10 分钟内去重；免打扰时段（默认 23:00–08:00）只发严重级 | 半夜拔盘只收到一条；新片入库推迟到早上汇总 |
 | T-04.4 | 汇总 | 每天早上 9 点发一条日报：新入库、播放次数、空间、告警 | 连续 3 天收到日报 |
 | T-04.5 | 失败重试 | 推送失败进队列，指数退避重试 24 小时 | 断网 10 分钟后恢复，积压的通知补发 |
@@ -117,12 +120,12 @@ C 类需求不写业务代码，交付物是 `docs/deploy.md` 的操作步骤，
 
 | 编号 | 子需求 | 实现要点 | 验收标准 |
 | --- | --- | --- | --- |
-| T-05.1 | Jellyfin 数据备份 | 每天 04:00；无人播放时短暂停止 Jellyfin → 打包配置与数据目录（tar + zstd）→ 启动；有人在播放则 30 分钟后重试，最晚 06:00 改为在线备份（SQLite 在线备份接口 + 复制其他文件） | 备份期间 Infuse 正在播放的用户不受影响 |
-| T-05.2 | 工具自身备份 | `config.yaml` 和状态库一起打包 | 备份包里包含两者 |
-| T-05.3 | 保留与校验 | 保留 14 份每日 + 8 份每周；写 SHA-256 清单；每周随机抽一份做完整性校验 | `mvault backup list` 显示每份的大小和校验结果 |
-| T-05.4 | 备份去处 | 至少一个与 Jellyfin 数据不在同一块盘的目标；可选 rclone 上传到云 | 内置盘坏了仍能拿到备份 |
-| T-05.5 | 家庭录像镜像 | 每晚 rsync 到第二目标；只增不删（删除需人工确认） | 误删原文件后能从镜像找回 |
-| T-05.6 | 恢复 | `mvault backup restore <备份> --target <目录>`；附恢复演练步骤 | 在另一台 Mac 恢复后，用户与观看记录完整（M1 验收项） |
+| T-05.1 | Jellyfin 数据备份 | 每天 04:00 调用 Jellyfin 内置备份（10.11 起提供，含数据库、元数据、字幕；接口名开发前在 swagger 核对），在线进行无需停服；内置备份没有定时功能，由本工具触发 | 备份期间 Infuse 正在播放的用户不受影响 |
+| T-05.2 | 工具自身备份 | `config.yaml` 和状态库与 Jellyfin 备份包一起存入 restic | 快照里包含三者 |
+| T-05.3 | 保留与校验 | restic `forget --keep-daily 14 --keep-weekly 8 --prune`；每周 `restic check --read-data-subset 10%` | `mvault backup list` 显示每个快照的时间、大小和最近校验结果 |
+| T-05.4 | 备份去处 | restic 仓库至少一个不与 Jellyfin 数据同盘（第二块盘）；可选第二个仓库放云端（restic 原生支持 S3、B2 等，或经 rclone）；仓库密码存钥匙串 | 内置盘坏了仍能拿到备份 |
+| T-05.5 | 家庭录像备份 | 每晚 restic 备份家庭录像目录，有版本历史，误删可找回 | 误删原文件后能从快照找回 |
+| T-05.6 | 恢复 | `mvault backup restore <快照>`：restic 取回备份包 → Jellyfin `--restore-archive <zip>` 或后台“备份”页恢复；附恢复演练步骤 | 在测试实例恢复后，用户与观看记录完整（M1 验收项）；同时确认能否恢复到另一台 Mac，不能则补一份停服时的数据目录副本 |
 
 ### 1.8 T-06 合法资源同步（P2）
 
@@ -132,7 +135,7 @@ C 类需求不写业务代码，交付物是 `docs/deploy.md` 的操作步骤，
 | T-06.2 | Internet Archive | 用官方 `internetarchive` 库按合集或搜索条件拉取；只接受授权字段为公有领域或 CC 的条目 | 授权不明的条目被跳过并记录原因 |
 | T-06.3 | Blender 开放电影 | 内置片单，按分辨率选文件 | 4K 版本下载完整 |
 | T-06.4 | 下载控制 | 只在设定时段（默认 01:00–07:00）下载；限速；断点续传；已下载的记一笔不重复下 | 同一条目不会下两次 |
-| T-06.5 | 交给入库 | 下载完成后写 NFO（标题、年份、来源、授权），放进 `Inbox/`，由 T-03 接手 | 入库后在 Jellyfin 简介里能看到来源和授权 |
+| T-06.5 | 交给入库 | 下载完成后写 NFO（标题、年份、来源、授权），放进 `Inbox/`，由 tinyMediaManager 或 T-03 接手 | 入库后在 Jellyfin 简介里能看到来源和授权 |
 
 ### 1.9 T-07 菜单栏 App（P2）
 
@@ -350,11 +353,12 @@ CREATE TABLE notifications (      -- 待发与已发通知（失败重试用）
 
 CREATE TABLE backups (
   id INTEGER PRIMARY KEY,
-  path TEXT NOT NULL,
-  kind TEXT NOT NULL,             -- daily / weekly / pre_upgrade
+  jellyfin_archive TEXT,          -- Jellyfin 内置备份生成的 zip 文件名
+  repo TEXT NOT NULL,             -- restic 仓库
+  snapshot_id TEXT NOT NULL,      -- restic 快照 ID
+  kind TEXT NOT NULL,             -- daily / pre_upgrade / home_videos
   size_bytes INTEGER,
-  sha256 TEXT,
-  verified_at TEXT,
+  checked_at TEXT,                -- 最近一次 restic check 通过的时间
   created_at TEXT NOT NULL
 );
 
@@ -415,19 +419,19 @@ inbox:
 notify:
   quiet_hours: "23:00-08:00"
   daily_digest: "09:00"
-  channels:
-    telegram: { bot_token: keychain:mediavault/telegram, chat_id: "123456" }
-    bark: { url: keychain:mediavault/bark }
-    email: { enabled: false }
+  channels:                     # Apprise URL，整条存钥匙串
+    - keychain:mediavault/apprise-telegram   # tgram://<bot_token>/<chat_id>
+    - keychain:mediavault/apprise-bark       # bark://<host>/<device_key>
+    # - keychain:mediavault/apprise-email    # mailto://...
 
 backup:
   schedule: "04:00"
-  targets: ["/Volumes/SSD-B/MediaVaultBackups"]
+  repos:                        # restic 仓库，密码存钥匙串
+    - path: "/Volumes/SSD-B/MediaVaultBackups"
+      password: keychain:mediavault/restic
   keep_daily: 14
   keep_weekly: 8
-  mirror:
-    - from: "/Volumes/SSD-A/Home Videos"
-      to: "/Volumes/SSD-B/Home Videos Mirror"
+  home_videos: ["/Volumes/SSD-A/Home Videos"]
 
 sources:
   enabled: false
@@ -469,6 +473,7 @@ upgrade:
 | 媒体库与选项 | `GET /Library/VirtualFolders`、`POST /Library/VirtualFolders/LibraryOptions` | T-02、doctor |
 | 刷新 | `POST /Library/Media/Updated`、`POST /Library/Refresh` | T-02、T-03 |
 | 冒烟测试 | `GET /Users/{id}/Views`、`POST /Items/{id}/PlaybackInfo` | T-08 |
+| 备份 | 10.11 起的内置备份接口（创建、列出备份） | T-05、T-08 |
 
 认证使用 `Authorization: MediaBrowser Token="<API Key>", Client="MediaVault", Version="x.y.z"` 请求头。
 
@@ -524,7 +529,7 @@ sequenceDiagram
   end
 ```
 
-**升级（T-08）**：检查条件 → 备份（kind=pre_upgrade）→ 停止 Jellyfin → 把旧版程序移到 `Jellyfin.app.prev` → 安装新版 → 启动 → 冒烟测试 → 通过则保留旧版 7 天后删除；失败则停止 → 恢复旧版程序和备份 → 启动 → 发严重告警。
+**升级（T-08）**：检查条件 → 备份（kind=pre_upgrade）→ 停止 Jellyfin → 把旧版程序移到 `Jellyfin.app.prev` → 安装新版 → 启动 → 冒烟测试 → 通过则保留旧版 7 天后删除；失败则停止 → 恢复旧版程序，用 `--restore-archive` 恢复升级前的备份 → 启动 → 发严重告警。
 
 ### 2.11 技术栈与依赖
 
@@ -536,11 +541,13 @@ sequenceDiagram
 | 配置校验 | `pydantic` |
 | 定时任务 | `APScheduler` 3.x |
 | 目录监听 | `watchdog`（macOS 下基于 FSEvents） |
-| 文件名解析 | `guessit` |
-| 校验和 | `xxhash`（移动校验）、`hashlib.sha256`（备份清单） |
+| 文件名解析 | `guessit`（`mvault lint`；T-03 若开发也用它） |
+| 通知发送 | `apprise` |
+| 校验和 | `xxhash`（T-03 跨盘移动校验） |
 | 钥匙串 | `keyring` |
 | Internet Archive | `internetarchive` |
-| 系统命令 | `diskutil`、`pmset`、`smartctl`（Homebrew `smartmontools`）、`rsync`、`zstd` |
+| 系统命令 | `diskutil`、`pmset`、`smartctl`（Homebrew `smartmontools`）、`restic`（Homebrew） |
+| 片库整理（人工） | tinyMediaManager |
 | 测试 | `pytest`、`pytest-asyncio`、`respx`（模拟 HTTP） |
 | 代码质量 | `ruff`（格式与检查）、`mypy` |
 | 菜单栏 App | Swift 5.9+ / SwiftUI，macOS 13+ |
@@ -570,8 +577,8 @@ emby/
 │   │   ├── guard.py            T-01
 │   │   ├── volumes.py          T-02
 │   │   ├── inbox/              T-03（parse.py, match.py, plan.py, apply.py）
-│   │   ├── notify/             T-04（rules.py, telegram.py, bark.py, email.py）
-│   │   ├── backup.py           T-05
+│   │   ├── notify/             T-04（rules.py, digest.py, send.py 封装 Apprise）
+│   │   ├── backup.py           T-05（调用 Jellyfin 备份接口与 restic）
 │   │   ├── sources/            T-06（base.py, internet_archive.py, blender.py）
 │   │   └── upgrade.py          T-08
 │   ├── doctor.py               F-08
@@ -602,7 +609,7 @@ emby/
 
 ## 3. 开发步骤
 
-时间按业余时间估算（每周约 8–10 小时）：步骤 0–1 对应 M0（第 1–2 周），步骤 2–3 对应 M1（第 3–5 周），步骤 4 对应 M2（第 6–8 周），步骤 5 对应 M3（第 9 周起）。每一步都有“完成标准”，没达到不进入下一步。
+时间按业余时间估算（每周约 8–10 小时）：步骤 0–1 对应 M0（第 1–2 周），步骤 2–3 对应 M1（第 3–5 周），步骤 4 对应 M2（第 6–7 周），步骤 5 对应 M3（第 8 周起）。每一步都有“完成标准”，没达到不进入下一步。
 
 ```mermaid
 flowchart LR
@@ -612,9 +619,9 @@ flowchart LR
   F --> T2["T-02 存储卷"]
   F --> T5["T-05 备份"]
   T1 & T2 & T5 --> G1{"M1 闸口<br/>拔盘 / 重启不丢数据"}
-  G1 --> T3["T-03 入库"]
   G1 --> T4["T-04 通知"]
-  T3 & T4 --> G2{"M2 闸口<br/>家人 2 周无故障"}
+  T4 --> G2{"M2 闸口<br/>家人 2 周无故障"}
+  G2 --> T3["T-03 入库自动化"]
   G2 --> T6["T-06 同步"]
   G2 --> T7["T-07 菜单栏"]
   G2 --> T8["T-08 升级"]
@@ -633,9 +640,9 @@ flowchart LR
 
 1. **部署**（对应 C-01 至 C-05）
    - [ ] 安装 Jellyfin，先按普通 App 方式跑通
-   - [ ] 按 C-02 整理现有片库；先写 `mvault lint`（复用 `guessit`），用它辅助整理
+   - [ ] 装 tinyMediaManager，按 C-02 整理现有片库并写 NFO；写 `mvault lint`（基于 `guessit`）检查结果
    - [ ] 建库、设语言、装插件、开 NFO
-   - [ ] Infuse 添加服务器；装 Tailscale
+   - [ ] Jellyfin 装 InfuseSync 插件；Infuse 添加服务器，分别用 Library Mode 和 Direct Mode 试用并定下默认；装 Tailscale
    - [ ] 把每一步写进 `docs/deploy.md`
 2. **Spike S-1：Jellyfin 的拔盘行为**
    - [ ] 拔掉外接盘 → 手动运行一次库扫描 → 插回，记录条目、进度、已看状态是否保留
@@ -670,25 +677,20 @@ flowchart LR
 - [ ] **T-01**：把 Jellyfin 切换到 LaunchDaemon 运行；`caffeinate` 任务；健康检查与限次重启；电源事件
 - [ ] **T-02**：卷登记命令、上下线检测、离线保护与恢复、启动对齐、空间与 SMART 告警
   - 用磁盘镜像写自动化测试：挂载 → 登记 → 卸载 → 检查触发器已清空 → 挂载 → 检查已恢复
-- [ ] **T-05**：每日备份、保留策略、校验、家庭录像镜像、恢复命令
+- [ ] **T-05**：定时调用 Jellyfin 内置备份、restic 入库与保留、每周校验、家庭录像备份、恢复命令
 - [ ] 通知暂时只写日志（T-04 在下一步做），但事件要发全
 - [ ] 跑需求文档 M1 验收清单，并做一次完整恢复演练
 
 完成标准：M1 验收清单全部通过；连续 7 天无人工干预运行。
 
-### 步骤 4 · M2 效率工具（2–3 周）
+### 步骤 4 · M2 效率工具（约 2 周）
 
-- [ ] **T-04 通知中心**（先做，后面的工具都要用）：Telegram、Bark、邮件；规则、免打扰、去重、日报、失败重试；接 Jellyfin Webhook（C-09）
-- [ ] **T-03 入库整理**：
-  1. 解析与归组，用 200 条测试集调到 ≥ 95%
-  2. TMDB 匹配与打分；`mvault inbox review` 人工确认
-  3. 计划生成与 `plan` 预览
-  4. 执行移动（复制 → 校验 → 删源）与撤销
-  5. 目录监听与自动执行
+- [ ] **T-04 通知中心**：用 Apprise 接 Telegram、Bark、邮件；规则、免打扰、去重、日报、失败重试；接 Jellyfin Webhook（C-09）
 - [ ] 配置 C-06 至 C-08：字幕插件、家人账户与儿童分级、硬件加速
+- [ ] 新片继续用 tinyMediaManager 手动入库，记录每部花多少时间，作为是否开发 T-03 的依据
 - [ ] 让家人正常使用 2 周，记录问题
 
-完成标准：家人连续 2 周使用无故障；入库自动化至少处理 20 部新片，无错移、无丢文件。
+完成标准：家人连续 2 周使用无故障；通知按规则送达，免打扰和日报正常。
 
 ### 步骤 5 · M3 增强（按需，每项约 1 周）
 
@@ -696,10 +698,11 @@ flowchart LR
 
 1. **T-08 升级守护**：Jellyfin 迟早要升级，这个最有价值。先做检查与通知，再做一键升级和回滚；用测试 Jellyfin 演练一次回滚
 2. **T-07 菜单栏 App**：先只读显示状态，再加操作按钮，最后做安全弹出
-3. **T-06 合法资源同步**：先接 Blender（简单），再接 Internet Archive
-4. C-10：按需装片头跳过和 Trakt 插件
+3. **T-03 入库自动化**（手动整理变得费事时才做）：先评估 tinyMediaManager 命令行；自研则依次做解析与归组（200 条测试集 ≥ 95%）、TMDB 匹配与 `review`、`plan` 预览、复制 → 校验 → 删源与撤销、目录监听与自动执行。完成标准：至少处理 20 部新片，无错移、无丢文件
+4. **T-06 合法资源同步**：先接 Blender（简单），再接 Internet Archive；入库可先交给 tinyMediaManager
+5. C-10：按需装片头跳过和 Trakt 插件
 
-每项完成标准见 1.8 至 1.10 的验收列。
+每项完成标准见 1.5、1.8 至 1.10 的验收列。
 
 ### 3.1 风险与对策
 
@@ -710,6 +713,7 @@ flowchart LR
 | `_jellyfin` 用户在非登录会话中用不了 VideoToolbox | 远程兜底转码不可用 | 只影响 C-08；可退回到在本人账户下以 LaunchAgent 运行 Jellyfin，并开启自动登录（未开 FileVault，此方案可用） |
 | 外接盘盒不支持 SMART | 无法预警硬盘故障 | 接受“不可用”；靠备份和镜像兜底；换支持 SAT 的硬盘盒 |
 | 入库识别错误把文件放错位置 | 片库混乱 | 低分进人工确认；所有移动可撤销；先在测试目录跑一周再开自动执行 |
+| Jellyfin 内置备份不能恢复到另一台 Mac，或接口变化 | 换机或升级回滚受阻 | M1 演练时确认；不行则每周另做一份停服时的数据目录副本存入 restic |
 
 ### 3.2 每步交付物汇总
 
@@ -719,5 +723,5 @@ flowchart LR
 | 1 | `mvault lint`、`mvault doctor` | `deploy.md`、Spike 结论 | M0 验收清单 |
 | 2 | 核心层、`install.sh`、plist | 更新 `deploy.md` | 24 小时稳定运行 |
 | 3 | T-01、T-02、T-05 | 恢复演练记录 | M1 验收清单、7 天无干预 |
-| 4 | T-03、T-04 | 入库使用说明 | 家人 2 周无故障 |
-| 5 | T-06、T-07、T-08 | 升级与回滚手册 | 各工具验收列 |
+| 4 | T-04 | tinyMediaManager 入库说明 | 家人 2 周无故障 |
+| 5 | T-03、T-06、T-07、T-08 | 升级与回滚手册 | 各工具验收列 |
