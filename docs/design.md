@@ -59,7 +59,8 @@ C 类需求不写业务代码，交付物是 `docs/deploy.md` 的操作步骤，
 
 - 接电时不睡眠（`pmset -g` 中 AC 的 `sleep 0`）、网络唤醒已开、硬盘睡眠已关。
 - 所有媒体卷都在 Spotlight 排除列表里（`mdutil -s` 显示 indexing disabled）。
-- FileVault 和防火墙已开。
+- 防火墙已开；FileVault 按需求文档 6.3 保持关闭（检测到开启时给出提醒：无人值守重启会卡在解锁界面）。
+- “查找我的 Mac”已开启。
 - Tailscale 已连接，并能拿到本机 Tailscale IP。
 - Jellyfin 只监听内网和 Tailscale 地址（检查 `lsof -iTCP:8096 -sTCP:LISTEN`）。
 - Jellyfin 和 `mvaultd` 都由 launchd 托管且在运行。
@@ -706,7 +707,7 @@ flowchart LR
 | --- | --- | --- |
 | S-1 发现 Jellyfin 拔盘必丢资料，且关扫描也挡不住 | T-02 无法保护数据 | 改为“盘离线时整体停止 Jellyfin”，或启动自研方案 |
 | Jellyfin API 在新版本中变化 | 工具失效 | Jellyfin 客户端集中在一个文件；集成测试覆盖所有用到的接口；升级前先在测试实例跑 |
-| `_jellyfin` 用户在非登录会话中用不了 VideoToolbox | 远程兜底转码不可用 | 只影响 C-08；可退回到在本人账户下以 LaunchAgent 运行 Jellyfin，并开启自动登录 |
+| `_jellyfin` 用户在非登录会话中用不了 VideoToolbox | 远程兜底转码不可用 | 只影响 C-08；可退回到在本人账户下以 LaunchAgent 运行 Jellyfin，并开启自动登录（未开 FileVault，此方案可用） |
 | 外接盘盒不支持 SMART | 无法预警硬盘故障 | 接受“不可用”；靠备份和镜像兜底；换支持 SAT 的硬盘盒 |
 | 入库识别错误把文件放错位置 | 片库混乱 | 低分进人工确认；所有移动可撤销；先在测试目录跑一周再开自动执行 |
 
